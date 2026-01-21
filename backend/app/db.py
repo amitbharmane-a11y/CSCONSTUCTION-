@@ -49,10 +49,15 @@ def get_connection():
     # Default to SQLite (local/dev and Vercel read-only bundle)
     IS_POSTGRESQL = False
     db_path = _get_db_path()
-    _ensure_db_dir()
 
-    # On Vercel, the code directory is read-only; open the bundled
-    # SQLite database in read-only mode so we can fetch data.
+    # Locally we can create the data directory if needed. On Vercel the
+    # filesystem is read-only, so we must skip directory creation and
+    # rely on the bundled SQLite file.
+    if not os.getenv("VERCEL"):
+        _ensure_db_dir()
+
+    # On Vercel, open the bundled SQLite database in read-only mode so
+    # we can fetch data without needing write access.
     if os.getenv("VERCEL"):
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
     else:
