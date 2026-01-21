@@ -19,3 +19,4 @@ backend/data/
 backend/.env
 frontend/.env
 
+.vercel
