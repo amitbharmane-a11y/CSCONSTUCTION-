@@ -8,15 +8,16 @@
 - **Framework**: React + Vite + Tailwind CSS
 - **Features**: Full dashboard UI with charts and KPI displays
 
-### Backend (FastAPI + SQLite)
-- **Status**: Ready for deployment
-- **Framework**: FastAPI + Python
-- **Database**: SQLite (local file-based)
+### Backend (FastAPI + Vercel Python Runtime)
+- **URL**: https://backend-puce-nine.vercel.app
+- **Status**: ✅ Deployed and running
+- **Framework**: FastAPI + Python 3.9
+- **Database**: SQLite (serverless compatible)
 - **Features**: REST API with comprehensive construction KPIs
 
 ## 🔧 Backend Deployment Options
 
-Since Vercel doesn't natively support FastAPI, deploy the backend to one of these platforms:
+The backend is now deployed on Vercel using their Python runtime. Alternative deployment options if needed:
 
 ### Option 1: Railway (Recommended)
 1. Go to [Railway.app](https://railway.app)
@@ -42,11 +43,15 @@ Since Vercel doesn't natively support FastAPI, deploy the backend to one of thes
 
 ## 🌐 Connecting Frontend to Backend
 
-Once backend is deployed, update the frontend environment variable:
+The frontend and backend are both deployed on Vercel and are already connected:
 
-1. In Vercel dashboard, go to your project settings
-2. Add environment variable:
-   - `VITE_API_BASE_URL=https://your-backend-url.com`
+- **Frontend**: https://frontend-three-zeta-46.vercel.app
+- **Backend API**: https://backend-puce-nine.vercel.app
+- **Connection**: Automatic via environment variable `VITE_API_BASE_URL`
+
+### Manual Environment Variable Setup (if needed):
+1. In Vercel dashboard → Frontend project settings
+2. Add environment variable: `VITE_API_BASE_URL=https://backend-puce-nine.vercel.app`
 3. Redeploy the frontend
 
 ## 📊 Features Included
