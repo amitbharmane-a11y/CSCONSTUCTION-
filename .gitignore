@@ -15,8 +15,10 @@ build/
 .vite/
 
 # Local DB / env
-backend/data/
+backend/data/*
+!backend/data/dashboard.sqlite3
 backend/.env
 frontend/.env
 
 .vercel
+.env*.local
