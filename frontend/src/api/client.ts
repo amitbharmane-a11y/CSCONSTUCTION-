@@ -2,8 +2,22 @@
 // backend in the same deployment via the "/api" route.
 // For local development, you can override this with
 // VITE_API_BASE_URL (e.g. http://localhost:8000).
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.toString().trim() || "/api";
+//
+// To avoid broken deployments when VITE_API_BASE_URL is accidentally
+// set to a localhost URL on Vercel, we automatically fall back to
+// "/api" whenever we're not running on localhost.
+let API_BASE_URL = "/api";
+const envBase = import.meta.env.VITE_API_BASE_URL?.toString().trim();
+
+if (envBase) {
+  const isLocalEnvUrl = envBase.includes("localhost") || envBase.includes("127.0.0.1");
+  const isBrowser = typeof window !== "undefined";
+  const isLocalHost = isBrowser && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
+  if (!isLocalEnvUrl || isLocalHost) {
+    API_BASE_URL = envBase;
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {

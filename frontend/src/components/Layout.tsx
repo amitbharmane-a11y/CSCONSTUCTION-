@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 import type { Project } from "../api/types";
+import { api } from "../api/client";
 import { Select } from "./ui";
 
 const nav = [
@@ -83,7 +84,7 @@ export default function Layout({
           </div>
           {children}
           <div className="mt-10 text-xs text-slate-500">
-            API: <span className="font-mono">{import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}</span>
+            API: <span className="font-mono">{api.API_BASE_URL}</span>
           </div>
         </main>
       </div>
