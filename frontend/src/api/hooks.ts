@@ -442,9 +442,7 @@ export function useCreateRiskRegister() {
       await qc.invalidateQueries({ queryKey: ["riskRegister", rr.project_id] });
     }
   });
-}
-
-// Portfolio Overview
+}// Portfolio Overview
 export function usePortfolioOverview() {
   return useQuery({
     queryKey: ["portfolioOverview"],
