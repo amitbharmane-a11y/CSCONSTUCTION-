@@ -1,93 +1,210 @@
 from __future__ import annotations
 
 import os
-import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import ConnectionFailure
+from beanie import init_beanie
+import asyncio
 
 from .settings import settings
 
-# Global variable to track database type
-IS_POSTGRESQL = False
-POSTGRES_CONNECTION = None
+# Global MongoDB client and database
+client = None
+database = None
+DB_AVAILABLE = False
 
-
-def _get_db_path() -> Path:
-    """Resolve the database path relative to the backend folder.
-
-    This makes sure the bundled SQLite file at backend/data/dashboard.sqlite3
-    is located correctly both locally and in Vercel serverless functions.
-    """
-    db_path = Path(settings.database_path)
-    if not db_path.is_absolute():
-        # backend/app/db.py -> backend
-        base_dir = Path(__file__).resolve().parents[1]
-        db_path = base_dir / db_path
-    return db_path
-
-
-def get_connection():
-    """Get database connection - supports both SQLite and PostgreSQL"""
-    global IS_POSTGRESQL, POSTGRES_CONNECTION
-
-    # Check if we have DATABASE_URL for PostgreSQL (Vercel)
-    database_url = os.getenv("DATABASE_URL")
-    if database_url and database_url.startswith("postgresql"):
-        if not IS_POSTGRESQL:
-            try:
-                import psycopg2
-                from psycopg2.extras import RealDictCursor
-                POSTGRES_CONNECTION = psycopg2.connect(database_url)
-                IS_POSTGRESQL = True
-            except ImportError:
-                print("psycopg2 not available, falling back to SQLite")
-                IS_POSTGRESQL = False
-
-        if IS_POSTGRESQL and POSTGRES_CONNECTION:
-            return POSTGRES_CONNECTION
-
-    # Default to SQLite (local/dev and Vercel read-only bundle)
-    IS_POSTGRESQL = False
-    db_path = _get_db_path()
-
-    # Locally we can create the data directory if needed. On Vercel the
-    # filesystem is read-only, so we must skip directory creation and
-    # rely on the bundled SQLite file.
-    if not os.getenv("VERCEL"):
-        _ensure_db_dir()
-
-    # On Vercel, open the bundled SQLite database in read-only mode so
-    # we can fetch data without needing write access.
-    if os.getenv("VERCEL"):
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
-    else:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-
-def _ensure_db_dir() -> None:
-    db_path = _get_db_path()
-    if db_path.parent and not db_path.parent.exists():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-
-@contextmanager
-def db_cursor():
-    conn = get_connection()
+async def init_mongodb():
+    """Initialize MongoDB connection"""
+    global client, database, DB_AVAILABLE
     try:
-        if IS_POSTGRESQL:
-            # PostgreSQL uses different cursor
-            cur = conn.cursor()
-        else:
-            # SQLite cursor
-            cur = conn.cursor()
-        yield cur
-        conn.commit()
-    finally:
-        if not IS_POSTGRESQL:
-            conn.close()
+        client = AsyncIOMotorClient(settings.mongodb_url)
+        database = client[settings.database_name]
+
+        # Test the connection
+        await client.admin.command('ping')
+        DB_AVAILABLE = True
+        print(f"Connected to MongoDB: {settings.database_name}")
+
+        # Initialize Beanie with document models
+        from .models import (
+            Project, DailyLog, DailyActivity, CostEntry, BudgetItem,
+            ProjectPackage, ProjectMilestone, RABill, QualityTest, NCR,
+            SafetyIncident, LabourManpower, PlantMachinery, MaterialInventory,
+            DrawingsApproval, RailwayBlock, RiskRegister, BOQItem,
+            CalibrationRecord, ClaimsVariation, ContractCompliance,
+            DelayReason, MaterialProcurement, RFI, StakeholderIssue,
+            SubcontractorPerformance, ThirdPartyInspection, ToolboxTalk,
+            VendorPerformance, WorkPermit
+        )
+
+        await init_beanie(
+            database=database,
+            document_models=[
+                Project, DailyLog, DailyActivity, CostEntry, BudgetItem,
+                ProjectPackage, ProjectMilestone, RABill, QualityTest, NCR,
+                SafetyIncident, LabourManpower, PlantMachinery, MaterialInventory,
+                DrawingsApproval, RailwayBlock, RiskRegister, BOQItem,
+                CalibrationRecord, ClaimsVariation, ContractCompliance,
+                DelayReason, MaterialProcurement, RFI, StakeholderIssue,
+                SubcontractorPerformance, ThirdPartyInspection, ToolboxTalk,
+                VendorPerformance, WorkPermit
+            ]
+        )
+
+    except Exception as e:
+        print(f"MongoDB connection failed: {str(e)}")
+        DB_AVAILABLE = False
+        print("Running with mock data fallback")
+
+
+async def seed_if_empty():
+    """Seed database with sample data if empty"""
+    if not DB_AVAILABLE:
+        print("⚠️ MongoDB not available, skipping seeding")
+        return
+
+    try:
+        # Check if projects collection is empty
+        count = await database.projects.count_documents({})
+        if count > 0:
+            return
+
+        # Insert sample project
+        from .models import Project
+        project = Project(
+            name="Railway ROB + Bridge Works (Pile Foundation & Sub-Structure)",
+            client="Indian Railways / PWD",
+            location="Maharashtra",
+            contract_no="PWD-IR-ROB-001",
+            start_date="2026-01-01",
+            end_date="2026-12-31",
+            total_contract_value=10_00_00_000,  # 10 crores total contract value
+            profit_margin_target=12.0,  # 12% profit margin target
+            contract_completion_date="2026-12-31",
+            project_manager="Shri. A. K. Sharma",
+            site_engineer="Er. R. K. Gupta",
+            status="active"
+        )
+
+        await project.insert()
+        print(f"✅ Database seeded with sample project ID: {project.id}")
+
+        # Seed additional sample data for all collections
+        await _seed_sample_data(project.id)
+
+    except Exception as e:
+        print(f"❌ Error seeding database: {e}")
+
+
+async def _seed_sample_data(project_id):
+    """Seed all collections with sample construction data"""
+    try:
+        # Seed project packages
+        from .models import ProjectPackage
+        packages = [
+            ProjectPackage(project_id=project_id, package_name="Pile Foundation Works", planned_value=2_00_00_000, actual_value=1_80_00_000, progress_percentage=90.0),
+            ProjectPackage(package_name="Bridge Sub-Structure", planned_value=3_00_00_000, actual_value=2_80_00_000, progress_percentage=93.3),
+            ProjectPackage(package_name="Bridge Super-Structure", planned_value=2_50_00_000, actual_value=2_20_00_000, progress_percentage=88.0),
+            ProjectPackage(package_name="Railway Track & Signaling", planned_value=2_50_00_000, actual_value=2_26_00_000, progress_percentage=90.4),
+        ]
+        for pkg in packages:
+            pkg.project_id = project_id
+            await pkg.insert()
+
+        # Seed milestones
+        from .models import ProjectMilestone
+        milestones = [
+            ProjectMilestone(project_id=project_id, milestone_name="Mobilization Complete", planned_date="2026-01-15", actual_date="2026-01-12", status="completed"),
+            ProjectMilestone(project_id=project_id, milestone_name="Pile Foundation 50% Complete", planned_date="2026-03-15", actual_date="2026-03-20", status="completed"),
+            ProjectMilestone(project_id=project_id, milestone_name="Bridge Deck Casting", planned_date="2026-08-15", actual_date="2026-08-30", status="in_progress"),
+            ProjectMilestone(project_id=project_id, milestone_name="Final Handover", planned_date="2026-12-15", actual_date=None, status="pending"),
+        ]
+        for milestone in milestones:
+            await milestone.insert()
+
+        # Seed RA Bills
+        from .models import RABill
+        ra_bills = [
+            RABill(project_id=project_id, bill_no="RA-001", bill_date="2026-02-28", bill_amount=45_00_000, certified_amount=42_00_000, paid_amount=42_00_000, payment_date="2026-03-15", status="paid"),
+            RABill(project_id=project_id, bill_no="RA-002", bill_date="2026-04-30", bill_amount=52_00_000, certified_amount=48_00_000, paid_amount=48_00_000, payment_date="2026-05-15", status="paid"),
+            RABill(project_id=project_id, bill_no="RA-003", bill_date="2026-06-30", bill_amount=58_00_000, certified_amount=55_00_000, paid_amount=55_00_000, payment_date="2026-07-15", status="paid"),
+            RABill(project_id=project_id, bill_no="RA-004", bill_date="2026-08-30", bill_amount=62_00_000, certified_amount=58_00_000, paid_amount=58_00_000, payment_date="2026-09-15", status="paid"),
+            RABill(project_id=project_id, bill_no="RA-005", bill_date="2026-10-30", bill_amount=68_00_000, certified_amount=65_00_000, paid_amount=None, payment_date=None, status="certified"),
+        ]
+        for bill in ra_bills:
+            await bill.insert()
+
+        # Seed Quality Tests
+        from .models import QualityTest
+        quality_tests = [
+            QualityTest(project_id=project_id, test_type="Concrete Cube Test", planned_tests=120, conducted_tests=118, passed_tests=115, pass_rate=97.5, status="ongoing"),
+            QualityTest(project_id=project_id, test_type="Rebar Testing", planned_tests=80, conducted_tests=76, passed_tests=74, pass_rate=97.4, status="ongoing"),
+            QualityTest(project_id=project_id, test_type="Soil Compaction", planned_tests=60, conducted_tests=58, passed_tests=56, pass_rate=96.6, status="ongoing"),
+            QualityTest(project_id=project_id, test_type="Weld Testing", planned_tests=40, conducted_tests=38, passed_tests=37, pass_rate=97.4, status="ongoing"),
+        ]
+        for test in quality_tests:
+            await test.insert()
+
+        # Seed NCRs
+        from .models import NCR
+        ncrs = [
+            NCR(project_id=project_id, ncr_no="NCR-001", description="Concrete mix design variation", raised_date="2026-03-15", category="Quality", severity="Medium", status="Closed", closure_date="2026-03-20"),
+            NCR(project_id=project_id, ncr_no="NCR-002", description="Formwork alignment issue", raised_date="2026-04-10", category="Quality", severity="Low", status="Closed", closure_date="2026-04-12"),
+            NCR(project_id=project_id, ncr_no="NCR-003", description="Reinforcement cover deficiency", raised_date="2026-05-05", category="Quality", severity="High", status="Open", closure_date=None),
+            NCR(project_id=project_id, ncr_no="NCR-004", description="Curing procedure non-compliance", raised_date="2026-06-20", category="Quality", severity="Medium", status="Open", closure_date=None),
+        ]
+        for ncr in ncrs:
+            await ncr.insert()
+
+        # Seed Safety Incidents
+        from .models import SafetyIncident
+        incidents = [
+            SafetyIncident(project_id=project_id, incident_no="INC-001", incident_date="2026-02-15", incident_type="Near Miss", description="Worker slip on wet surface", severity="Low", status="Closed", action_taken="Safety briefing conducted"),
+            SafetyIncident(project_id=project_id, incident_no="INC-002", incident_date="2026-03-22", incident_type="First Aid", description="Minor cut during rebar work", severity="Low", status="Closed", action_taken="First aid provided, safety gloves reinforced"),
+            SafetyIncident(project_id=project_id, incident_no="INC-003", incident_date="2026-05-10", incident_type="Medical Treatment", description="Eye irritation from concrete dust", severity="Medium", status="Closed", action_taken="PPE training reinforced"),
+            SafetyIncident(project_id=project_id, incident_no="INC-004", incident_date="2026-07-05", incident_type="Lost Time Injury", description="Ankle sprain during material handling", severity="High", status="Closed", action_taken="Medical treatment provided, lifting equipment training"),
+        ]
+        for incident in incidents:
+            await incident.insert()
+
+        # Seed Labour Manpower
+        from .models import LabourManpower
+        labour_data = [
+            LabourManpower(project_id=project_id, recorded_date="2026-10-01", planned_manpower=150, actual_manpower=145, mason_count=25, carpenter_count=15, bar_bender_count=20, welder_count=8, absenteeism_rate=3.3, overtime_hours=120),
+        ]
+        for labour in labour_data:
+            await labour.insert()
+
+        # Seed Plant Machinery
+        from .models import PlantMachinery
+        machinery = [
+            PlantMachinery(project_id=project_id, equipment_name="Batching Plant", equipment_type="Concrete Plant", availability_percentage=95.0, utilization_percentage=88.0, breakdown_hours=12, idle_time_causes="Waiting for material"),
+            PlantMachinery(project_id=project_id, equipment_name="Pile Driving Rig", equipment_type="Foundation Equipment", availability_percentage=92.0, utilization_percentage=85.0, breakdown_hours=24, idle_time_causes="Weather conditions"),
+            PlantMachinery(project_id=project_id, equipment_name="Concrete Pump", equipment_type="Placing Equipment", availability_percentage=98.0, utilization_percentage=90.0, breakdown_hours=8, idle_time_causes="No front"),
+        ]
+        for machine in machinery:
+            await machine.insert()
+
+        # Seed Material Inventory
+        from .models import MaterialInventory
+        materials = [
+            MaterialInventory(project_id=project_id, material_name="Cement", current_stock=150, min_stock=100, max_stock=300, unit="MT", stock_value=4_50_000, lead_time_days=3),
+            MaterialInventory(project_id=project_id, material_name="Steel Reinforcement", current_stock=45, min_stock=30, max_stock=100, unit="MT", stock_value=13_50_000, lead_time_days=7),
+            MaterialInventory(project_id=project_id, material_name="Coarse Aggregate", current_stock=200, min_stock=150, max_stock=400, unit="Cum", stock_value=2_00_000, lead_time_days=2),
+        ]
+        for material in materials:
+            await material.insert()
+
+        print("✅ All sample data seeded successfully")
+
+    except Exception as e:
+        print(f"❌ Error seeding sample data: {e}")
+
+
+def init_db():
+    """Initialize database (compatibility function)"""
+    # This is now async, so we'll handle it in the main startup
+    pass
 
 
 def init_db() -> None:

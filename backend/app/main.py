@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .db import init_db, seed_if_empty
+from .db import init_mongodb, seed_if_empty, DB_AVAILABLE
+from .models import (
+    Project, DailyLog, DailyActivity, CostEntry, BudgetItem,
+    ProjectPackage, ProjectMilestone, RABill, QualityTest, NCR,
+    SafetyIncident, LabourManpower, PlantMachinery, MaterialInventory,
+    DrawingsApproval, RailwayBlock, RiskRegister, BOQItem,
+    CalibrationRecord, ClaimsVariation, ContractCompliance,
+    DelayReason, MaterialProcurement, RFI, StakeholderIssue,
+    SubcontractorPerformance, ThirdPartyInspection, ToolboxTalk,
+    VendorPerformance, WorkPermit
+)
 import os
 
 # Mock data for fallback when database is not available
@@ -57,16 +68,14 @@ MOCK_COST_ENTRIES = [
 # Initialize database at import time (for local/dev). On Vercel, the
 # filesystem is read-only for bundled files, so initialization may fail;
 # we catch and fall back to mock data.
-DB_AVAILABLE = True
-try:
-    if not os.getenv("VERCEL"):
-        init_db()
-        seed_if_empty()
-except Exception as e:
-    print(f"Database initialization failed: {e}")
-    DB_AVAILABLE = False
-    # For Vercel deployment, continue without database
-    pass
+async def init_database():
+    global DB_AVAILABLE
+    try:
+        await init_mongodb()
+        await seed_if_empty()
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        DB_AVAILABLE = False
 from .schemas import (
     AiChatRequest,
     AiChatResponse,
@@ -137,8 +146,6 @@ from .schemas import (
     WorkPermitCreate
 )
 from .services.ai import answer as ai_answer
-from .utils import row_to_dict, rows_to_dicts
-from .db import db_cursor
 
 
 app = FastAPI(title="C S Construction Dashboard API", version="0.1.0")
@@ -153,21 +160,16 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def _startup() -> None:
-    """Run DB initialization only in environments where writes are allowed.
-
-    On Vercel, we ship a pre-built SQLite file and open it read-only, so we
-    skip schema/seed writes during startup.
-    """
+async def _startup() -> None:
+    """Run MongoDB initialization"""
     global DB_AVAILABLE
 
-    if os.getenv("VERCEL"):
-        return
-
     try:
-        init_db()
-        seed_if_empty()
-        DB_AVAILABLE = True
+        await init_database()
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        DB_AVAILABLE = False
+        print("Application will run with mock data fallback")
     except Exception as e:
         print(f"Database startup initialization failed: {e}")
         DB_AVAILABLE = False
@@ -483,7 +485,6 @@ def summary(project_id: int, from_date: str | None = None, to_date: str | None =
     # Get job costing categories (simplified version)
     job_costing_categories = []
     # We'll use the same logic as the job costing endpoint but simplified
-    from .utils import row_to_dict
 
     with db_cursor() as cur:
         cur.execute(
@@ -597,7 +598,7 @@ def _job_costing_category_for_head(cost_head: str) -> str:
 
 
 @app.get("/projects/{project_id}/job-costing", response_model=JobCostingSummary)
-def job_costing(project_id: int, from_date: str | None = None, to_date: str | None = None) -> JobCostingSummary:
+async def job_costing(project_id: str, from_date: str | None = None, to_date: str | None = None) -> JobCostingSummary:
     if not DB_AVAILABLE:
         # Return mock job costing data when database is not available
         return JobCostingSummary(
@@ -652,44 +653,35 @@ def job_costing(project_id: int, from_date: str | None = None, to_date: str | No
         )
 
     try:
-        where_cost = ["project_id = ?"]
-        params_cost: list[Any] = [project_id]
-        if from_date:
-            where_cost.append("entry_date >= ?")
-            params_cost.append(from_date)
-        if to_date:
-            where_cost.append("entry_date <= ?")
-            params_cost.append(to_date)
-
-        with db_cursor() as cur:
-            cur.execute("SELECT * FROM projects WHERE id = ?;", (project_id,))
-        proj = cur.fetchone()
-        if not proj:
+        # Get project details
+        project = await Project.get(project_id)
+        if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        cur.execute(
-            f"""
-            SELECT cost_head,
-                   SUM(amount) AS amt,
-                   SUM(COALESCE(quantity, 0)) AS qty,
-                   GROUP_CONCAT(DISTINCT COALESCE(uom, '')) AS uoms
-            FROM cost_entries
-            WHERE {' AND '.join(where_cost)}
-            GROUP BY cost_head
-            """,
-            params_cost,
-        )
-        costs = rows_to_dicts(cur.fetchall())
+        # Build query for cost entries
+        query_filter = {"project_id": project_id}
+        if from_date:
+            query_filter["entry_date"] = {"$gte": from_date}
+        if to_date:
+            if "entry_date" not in query_filter:
+                query_filter["entry_date"] = {}
+            query_filter["entry_date"]["$lte"] = to_date
 
-        cur.execute(
-            """
-            SELECT cost_head, budget_amount
-            FROM budget_items
-            WHERE project_id = ?
-            """,
-            (project_id,),
-        )
-        budgets = rows_to_dicts(cur.fetchall())
+        # Aggregate cost entries by cost_head
+        pipeline = [
+            {"$match": query_filter},
+            {"$group": {
+                "_id": "$cost_head",
+                "total_amount": {"$sum": "$amount"},
+                "total_quantity": {"$sum": {"$ifNull": ["$quantity", 0]}},
+                "uoms": {"$addToSet": {"$ifNull": ["$uom", ""]}}
+            }}
+        ]
+
+        cost_aggregates = await CostEntry.aggregate(pipeline).to_list()
+
+        # Get budget items
+        budget_items = await BudgetItem.find(BudgetItem.project_id == project_id).to_list()
 
         # Aggregate by category
         planned_by_cat: dict[str, float] = defaultdict(float)
@@ -697,19 +689,17 @@ def job_costing(project_id: int, from_date: str | None = None, to_date: str | No
         qty_by_cat: dict[str, float] = defaultdict(float)
         uoms_by_cat: dict[str, set[str]] = defaultdict(set)
 
-        for b in budgets:
-            cat = _job_costing_category_for_head(str(b["cost_head"]))
-            planned_by_cat[cat] += float(b.get("budget_amount") or 0.0)
+        for budget in budget_items:
+            cat = _job_costing_category_for_head(budget.cost_head)
+            planned_by_cat[cat] += budget.budget_amount
 
-        for c in costs:
-            cat = _job_costing_category_for_head(str(c["cost_head"]))
-            actual_by_cat[cat] += float(c.get("amt") or 0.0)
-            qty_by_cat[cat] += float(c.get("qty") or 0.0)
-            raw = str(c.get("uoms") or "")
-            for u in raw.split(","):
-                u = u.strip()
-                if u:
-                    uoms_by_cat[cat].add(u)
+        for cost_agg in cost_aggregates:
+            cat = _job_costing_category_for_head(cost_agg["_id"])
+            actual_by_cat[cat] += cost_agg["total_amount"]
+            qty_by_cat[cat] += cost_agg["total_quantity"]
+            for uom in cost_agg["uoms"]:
+                if uom and uom.strip():
+                    uoms_by_cat[cat].add(uom.strip())
 
         categories_order = ["Labour", "Materials", "Equipment", "Subcontractors", "Other"]
         total_planned = float(sum(planned_by_cat.values()))
@@ -748,37 +738,14 @@ def job_costing(project_id: int, from_date: str | None = None, to_date: str | No
                 )
             )
 
-        proj_d = row_to_dict(proj)
         return JobCostingSummary(
             project_id=project_id,
-            project_name=proj_d["name"],
-            total_budget=sum(planned_by_cat.values()),
-            total_actual_cost=sum(actual_by_cat.values()),
-            total_variance=sum(actual_by_cat.values()) - sum(planned_by_cat.values()),
-            percent_over_under_budget=(
-                ((sum(actual_by_cat.values()) - sum(planned_by_cat.values())) / sum(planned_by_cat.values()) * 100)
-                if sum(planned_by_cat.values()) > 0 else 0
-            ),
-            categories=[
-                JobCostingCategory(
-                    category=cat,
-                    planned_cost=planned_by_cat[cat],
-                    actual_cost=actual_by_cat[cat],
-                    quantity=qty_by_cat[cat] if qty_by_cat[cat] > 0 else None,
-                    uom=list(uoms_by_cat[cat])[0] if uoms_by_cat[cat] else None,
-                    unit_cost=(
-                        actual_by_cat[cat] / qty_by_cat[cat] if qty_by_cat[cat] > 0 and actual_by_cat[cat] > 0 else None
-                    ),
-                    percent_of_total_actual=(
-                        (actual_by_cat[cat] / sum(actual_by_cat.values()) * 100) if sum(actual_by_cat.values()) > 0 else 0
-                    ),
-                    percent_over_under_budget=(
-                        ((actual_by_cat[cat] - planned_by_cat[cat]) / planned_by_cat[cat] * 100)
-                        if planned_by_cat[cat] > 0 else 0
-                    ),
-                )
-                for cat in sorted(set(planned_by_cat.keys()) | set(actual_by_cat.keys()))
-            ],
+            project_name=project.name,
+            total_budget=total_planned,
+            total_actual_cost=total_actual,
+            total_variance=total_actual - total_planned,
+            percent_over_under_budget=((total_actual - total_planned) / total_planned * 100) if total_planned > 0 else 0.0,
+            categories=cats,
         )
     except Exception as e:
         print(f"Database query failed in job_costing: {e}")
