@@ -375,9 +375,7 @@ export function useMaterialInventory(projectId: number | null) {
     enabled: !!projectId,
     queryFn: () => api.get<MaterialInventory[]>(`/projects/${projectId}/material-inventory`)
   });
-}
-
-export function useCreateMaterialInventory() {
+}export function useCreateMaterialInventory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: MaterialInventoryCreate) => api.post<MaterialInventory>("/material-inventory", payload),
